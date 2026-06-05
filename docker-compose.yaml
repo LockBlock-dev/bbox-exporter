@@ -9,8 +9,13 @@ services:
     environment:
       BBOX_PASSWORD: ${BBOX_PASSWORD:?BBOX_PASSWORD is required}
       BBOX_URL: ${BBOX_URL:-https://mabbox.bytel.fr}
+      BBOX_RESOLVE_ADDRESS: ${BBOX_RESOLVE_ADDRESS:-}
+      BBOX_TLS_INSECURE: ${BBOX_TLS_INSECURE:-true}
+      BBOX_SCRAPE_TIMEOUT_MS: ${BBOX_SCRAPE_TIMEOUT_MS:-30000}
       TELEMETRY_ADDRESS: 0.0.0.0:9100
       METRICS_PATH: /metrics
+    extra_hosts:
+      - "mabbox.bytel.fr:${BBOX_RESOLVE_ADDRESS:-192.168.1.254}"
     ports:
       - "9100:9100"
 

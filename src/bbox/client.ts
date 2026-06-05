@@ -90,6 +90,8 @@ export class BboxClient {
       options.tlsInsecure ??
       BboxClient.parseBoolean(process.env.BBOX_TLS_INSECURE, "BBOX_TLS_INSECURE");
 
+    if (tlsInsecure) process.env.NODE_TLS_REJECT_UNAUTHORIZED ??= "0";
+
     this.baseUrl = new URL(options.baseUrl ?? DEFAULT_BASE_URL);
     this.http = new HttpClient(this.baseUrl, {
       cookieJar: new HttpCookieJar(),

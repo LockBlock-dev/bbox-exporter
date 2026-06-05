@@ -22,8 +22,10 @@ BBOX_SCRAPE_TIMEOUT_MS=30000
 ```
 
 `BBOX_RESOLVE_ADDRESS` is optional and works like `curl --resolve`: requests still target
-`BBOX_URL`, but DNS for that hostname is overridden with the configured IP address.
-`BBOX_TLS_INSECURE=true` is optional and works like `curl -k`.
+`BBOX_URL`, but DNS for that hostname is overridden with the configured IP address. With Bun in
+Docker, the Compose file maps `mabbox.bytel.fr` through `extra_hosts` because custom Undici DNS
+resolution is not consistently applied.
+`BBOX_TLS_INSECURE=true` is only useful with an HTTPS `BBOX_URL` and works like `curl -k`.
 
 ## Docker Compose
 

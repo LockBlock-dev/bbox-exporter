@@ -1,0 +1,4 @@
+export const BBOX_BANDWIDTH_KILOBITS = 1000;
+export const DEFAULT_METRICS_PATH = "/metrics";
+export const DEFAULT_SCRAPE_TIMEOUT_MS = 30_000;
+export const DEFAULT_TELEMETRY_ADDRESS = "0.0.0.0:9100";

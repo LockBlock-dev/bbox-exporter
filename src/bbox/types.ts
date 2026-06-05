@@ -6,6 +6,13 @@ export type FormPrimitive = string | number | boolean | null | undefined;
 export type FormValue = FormPrimitive | readonly FormPrimitive[];
 export type FormInput = URLSearchParams | Record<string, FormValue> | null | undefined;
 
+export interface BboxClientOptions {
+  baseUrl?: string | URL;
+  headers?: HeadersRecord;
+  resolveAddress?: string;
+  tlsInsecure?: boolean;
+}
+
 export interface BboxRequestOptions {
   headers?: HeadersRecord;
   query?: QueryInput;

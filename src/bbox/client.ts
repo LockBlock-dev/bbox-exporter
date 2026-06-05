@@ -1,10 +1,14 @@
 import "dotenv/config";
+import { lookup as dnsLookup } from "node:dns";
+import { isIP, type LookupFunction } from "node:net";
+
 import { HttpClient, HttpCookieJar, type HttpMethod } from "http-lib";
+import { Agent } from "undici";
 
 import { bboxApiRoutes, DEFAULT_BASE_URL, DEFAULT_USER_AGENT } from "./constants";
 import type {
-  BboxFormRequestOptions,
   BboxAlertsResponse,
+  BboxClientOptions,
   BboxContentFilteringResponse,
   BboxCplResponse,
   BboxDeviceCpuResponse,
@@ -64,6 +68,7 @@ import type {
   BboxWirelessSchedulerResponse,
   BboxWirelessStatsResponse,
   BboxWpsResponse,
+  BboxFormRequestOptions,
   FormInput,
   FormValue,
   HeadersRecord,
@@ -73,19 +78,26 @@ import type {
 
 export class BboxClient {
   public readonly routes = bboxApiRoutes;
+  private readonly baseUrl: URL;
   private readonly http: HttpClient;
 
   /**
    * Creates an HTTP client configured for the Bbox API.
    */
-  constructor() {
-    const cookieJar = new HttpCookieJar();
+  constructor(options: BboxClientOptions = {}) {
+    const resolveAddress = options.resolveAddress ?? process.env.BBOX_RESOLVE_ADDRESS;
+    const tlsInsecure =
+      options.tlsInsecure ??
+      BboxClient.parseBoolean(process.env.BBOX_TLS_INSECURE, "BBOX_TLS_INSECURE");
 
-    this.http = new HttpClient(DEFAULT_BASE_URL, {
-      cookieJar,
+    this.baseUrl = new URL(options.baseUrl ?? DEFAULT_BASE_URL);
+    this.http = new HttpClient(this.baseUrl, {
+      cookieJar: new HttpCookieJar(),
+      dispatcher: this.createDispatcher(resolveAddress, tlsInsecure),
       headers: {
         Accept: "application/json",
         "User-Agent": DEFAULT_USER_AGENT,
+        ...options.headers,
       },
     });
   }
@@ -1009,6 +1021,45 @@ export class BboxClient {
   }
 
   /**
+   * Builds an optional Undici dispatcher for curl-like --resolve and -k behavior.
+   */
+  private createDispatcher(resolveAddress: string | undefined, tlsInsecure: boolean | undefined) {
+    if (!resolveAddress && !tlsInsecure) return undefined;
+
+    if (resolveAddress && !isIP(resolveAddress))
+      throw new Error(`Invalid BBOX_RESOLVE_ADDRESS IP address: ${resolveAddress}`);
+
+    return new Agent({
+      connect: {
+        lookup: resolveAddress ? this.createLookup(resolveAddress) : undefined,
+        rejectUnauthorized: tlsInsecure ? false : undefined,
+        servername: this.baseUrl.hostname,
+      },
+    });
+  }
+
+  /**
+   * Resolves the configured Bbox hostname to a fixed IP address.
+   */
+  private createLookup(resolveAddress: string): LookupFunction {
+    const family = isIP(resolveAddress);
+
+    return (hostname, options, callback) => {
+      if (hostname === this.baseUrl.hostname) {
+        if (options?.all) {
+          callback(null, [{ address: resolveAddress, family }]);
+          return;
+        }
+
+        callback(null, resolveAddress, family);
+        return;
+      }
+
+      dnsLookup(hostname, options, callback);
+    };
+  }
+
+  /**
    * Resolves a wireless band route.
    */
   private wirelessBandPath(band: 24 | 5 | 6) {
@@ -1117,5 +1168,19 @@ export class BboxClient {
       ForceData: form.toString(),
       ...headers,
     };
+  }
+
+  /**
+   * Parses an optional boolean environment variable.
+   */
+  private static parseBoolean(value: string | undefined, label = "boolean value") {
+    if (value === undefined || value === "") return undefined;
+
+    const normalizedValue = value.toLowerCase();
+
+    if (["1", "true", "yes", "on"].includes(normalizedValue)) return true;
+    if (["0", "false", "no", "off"].includes(normalizedValue)) return false;
+
+    throw new Error(`Invalid ${label}: ${value}`);
   }
 }

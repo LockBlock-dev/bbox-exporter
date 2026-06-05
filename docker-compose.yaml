@@ -1,34 +1,34 @@
 services:
-    bbox-exporter:
-        build:
-            context: .
-            args:
-                BUN_VERSION: "1.3"
-        image: bbox-exporter:latest
-        restart: unless-stopped
-        environment:
-            BBOX_PASSWORD: ${BBOX_PASSWORD:?BBOX_PASSWORD is required}
-            BBOX_URL: ${BBOX_URL:-https://mabbox.bytel.fr}
-            TELEMETRY_ADDRESS: 0.0.0.0:9100
-            METRICS_PATH: /metrics
-        ports:
-            - "9100:9100"
+  bbox-exporter:
+    build:
+      context: .
+      args:
+        BUN_VERSION: "1.3"
+    image: bbox-exporter:latest
+    restart: unless-stopped
+    environment:
+      BBOX_PASSWORD: ${BBOX_PASSWORD:?BBOX_PASSWORD is required}
+      BBOX_URL: ${BBOX_URL:-https://mabbox.bytel.fr}
+      TELEMETRY_ADDRESS: 0.0.0.0:9100
+      METRICS_PATH: /metrics
+    ports:
+      - "9100:9100"
 
-    prometheus:
-        image: prom/prometheus:v3.12.0
-        restart: unless-stopped
-        depends_on:
-            - bbox-exporter
-        command:
-            - --config.file=/etc/prometheus/prometheus.yml
-            - --storage.tsdb.path=/prometheus
-            - --web.console.libraries=/usr/share/prometheus/console_libraries
-            - --web.console.templates=/usr/share/prometheus/consoles
-        ports:
-            - "9090:9090"
-        volumes:
-            - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-            - prometheus-data:/prometheus
+  prometheus:
+    image: prom/prometheus:v3.12.0
+    restart: unless-stopped
+    depends_on:
+      - bbox-exporter
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
 
 volumes:
-    prometheus-data:
+  prometheus-data:

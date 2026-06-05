@@ -1,4 +1,8 @@
-import { DEFAULT_METRICS_PATH, DEFAULT_SCRAPE_TIMEOUT_MS, DEFAULT_TELEMETRY_ADDRESS } from "./constants";
+import {
+  DEFAULT_METRICS_PATH,
+  DEFAULT_SCRAPE_TIMEOUT_MS,
+  DEFAULT_TELEMETRY_ADDRESS,
+} from "./constants";
 
 export function parseTelemetryAddress(address = DEFAULT_TELEMETRY_ADDRESS) {
   const separator = address.lastIndexOf(":");

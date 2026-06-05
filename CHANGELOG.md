@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-05
+
+### Added
+
+- Added optional Bbox hostname resolution override with `BBOX_RESOLVE_ADDRESS` or `BBOX_RESOLVE_IP`, matching curl's `--resolve` behavior.
+- Added optional insecure TLS mode with `BBOX_TLS_INSECURE`, matching curl's `-k` behavior.
+
+### Changed
+
+- Updated Bbox HTTP client setup to pass an Undici dispatcher through `http-lib`
+
 ## [1.0.0] - 2026-06-05
 
 ### Added

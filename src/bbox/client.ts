@@ -254,8 +254,8 @@ export class BboxClient {
   /**
    * Fetches Bbox device logs.
    */
-  async getLogs() {
-    return this.get<BboxLogsResponse>(this.routes.logs);
+  async getLogs(options: BboxRequestOptions = {}) {
+    return this.get<BboxLogsResponse>(this.routes.logs, options);
   }
 
   /**

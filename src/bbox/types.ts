@@ -324,6 +324,13 @@ export interface BboxDnsStatsItem {
   };
 }
 
+export interface BboxLogItem {
+  date?: string;
+  log?: string;
+  param?: string;
+  [key: string]: unknown;
+}
+
 export type BboxSummaryResponse = BboxApiList<BboxSummaryItem>;
 export type BboxDeviceResponse = BboxApiList<BboxDeviceItem>;
 export type BboxHostsResponse = BboxApiList<{
@@ -349,7 +356,7 @@ export type BboxWanIPResponse = BboxKeyedResponse<"wan">;
 export type BboxWanIPStatsResponse = BboxApiList<BboxWanIPStatsItem>;
 export type BboxLanIPResponse = BboxKeyedResponse<"lan">;
 export type BboxServicesResponse = BboxKeyedResponse<"services">;
-export type BboxLogsResponse = BboxKeyedResponse<"log", BboxApiObject[]>;
+export type BboxLogsResponse = BboxKeyedResponse<"log", BboxLogItem[]>;
 export type BboxAlertsResponse = BboxKeyedResponse<"alerts">;
 export type BboxParentalControlResponse = BboxKeyedResponse<"parentalcontrol">;
 export type BboxParentalControlSchedulerResponse = BboxKeyedResponse<"parentalcontrol">;

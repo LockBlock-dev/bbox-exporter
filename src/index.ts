@@ -1,14 +1,42 @@
 /// <reference types="bun" />
 
 import "dotenv/config";
+import { BboxClient } from "./bbox";
 import { BboxExporterClient } from "./exporter/client";
-import { parseMetricsPath, parseScrapeTimeoutMs, parseTelemetryAddress } from "./exporter/config";
+import {
+  parseLogsPollIntervalMs,
+  parseLokiLabels,
+  parseLokiPushUrl,
+  parseLokiTenantId,
+  parseMetricsPath,
+  parseScrapeTimeoutMs,
+  parseTelemetryAddress,
+} from "./exporter/config";
+import { BboxLokiLogForwarder } from "./exporter/loki";
 
+const bbox = new BboxClient();
+const scrapeTimeoutMs = parseScrapeTimeoutMs(process.env.BBOX_SCRAPE_TIMEOUT_MS);
 const exporter = new BboxExporterClient({
-  scrapeTimeoutMs: parseScrapeTimeoutMs(process.env.BBOX_SCRAPE_TIMEOUT_MS),
+  bbox,
+  scrapeTimeoutMs,
 });
 const telemetryAddress = parseTelemetryAddress(process.env.TELEMETRY_ADDRESS);
 const metricsPath = parseMetricsPath(process.env.METRICS_PATH);
+const lokiPushUrl = parseLokiPushUrl(process.env.LOKI_PUSH_URL);
+
+if (lokiPushUrl) {
+  const logForwarder = new BboxLokiLogForwarder({
+    bbox,
+    labels: parseLokiLabels(process.env.LOKI_LABELS),
+    pollIntervalMs: parseLogsPollIntervalMs(process.env.BBOX_LOGS_POLL_INTERVAL_MS),
+    pushUrl: lokiPushUrl,
+    scrapeTimeoutMs,
+    tenantId: parseLokiTenantId(process.env.LOKI_TENANT_ID),
+  });
+
+  logForwarder.start();
+  console.log(`Bbox logs forwarding to Loki at ${lokiPushUrl.toString()}`);
+}
 
 const server = Bun.serve({
   hostname: telemetryAddress.hostname,

@@ -11,7 +11,7 @@ permissions:
     packages: write
 
 env:
-    IMAGE_NAME: ghcr.io/${{ github.repository }}
+    IMAGE_NAME: ghcr.io/lockblock-dev/bbox-exporter
 
 jobs:
     build-and-push:

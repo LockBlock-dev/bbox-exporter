@@ -40,6 +40,14 @@ Endpoints:
 - Exporter: `http://localhost:9100/metrics`
 - Prometheus: `http://localhost:9090`
 
+## Grafana Dashboard
+
+An example Grafana dashboard is available here [`grafana/dashboard.json`](grafana/dashboard.json).
+
+Import it from Grafana with **Dashboards > New > Import**, then select your Prometheus data source
+when prompted. The dashboard includes panels for WAN/LAN bandwidth, DNS and WAN diagnostics, device
+temperature, access technology state, connected devices, CPU, memory, and Bbox model information.
+
 ## Local Development
 
 ```bash

@@ -4,7 +4,8 @@ name: Publish Docker image to GHCR
 on:
     push:
         branches: [master]
-        tags: ["v*"]
+        tags:
+            - "*.*.*"
 
 permissions:
     contents: read
@@ -35,3 +36,4 @@ jobs:
                   tags: |
                       ${{ env.IMAGE_NAME }}:latest
                       ${{ env.IMAGE_NAME }}:${{ github.sha }}
+                      ${{ env.IMAGE_NAME }}:${{ github.ref_name }}

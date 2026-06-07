@@ -1,29 +1,12 @@
 import { BboxClient, type BboxLogItem } from "../bbox";
 import { DEFAULT_BBOX_LOGS_POLL_INTERVAL_MS, DEFAULT_LOKI_LABELS } from "./constants";
-
-export type BboxLogsClient = Pick<BboxClient, "getLogs" | "login">;
-
-export interface BboxLokiLogForwarderOptions {
-  bbox?: BboxLogsClient;
-  labels?: Record<string, string>;
-  logger?: Pick<Console, "error" | "warn">;
-  pollIntervalMs?: number;
-  pushUrl: string | URL;
-  scrapeTimeoutMs?: number;
-  tenantId?: string;
-}
-
-interface LokiEntry {
-  event: string;
-  key: string;
-  line: string;
-  timestampNs: string;
-}
-
-interface LokiStream {
-  stream: Record<string, string>;
-  values: [string, string][];
-}
+import type {
+  BboxLokiMetricsRecorder,
+  BboxLogsClient,
+  BboxLokiLogForwarderOptions,
+  LokiEntry,
+  LokiStream,
+} from "./types";
 
 const seenLogLimit = 50;
 
@@ -34,6 +17,7 @@ export class BboxLokiLogForwarder {
   private readonly bbox: BboxLogsClient;
   private readonly labels: Record<string, string>;
   private readonly logger: Pick<Console, "error" | "warn">;
+  private readonly metrics: BboxLokiMetricsRecorder | undefined;
   private readonly pollIntervalMs: number;
   private readonly pushUrl: URL;
   private readonly scrapeTimeoutMs: number;
@@ -51,6 +35,8 @@ export class BboxLokiLogForwarder {
     this.bbox = options.bbox ?? new BboxClient();
     this.labels = options.labels ?? { ...DEFAULT_LOKI_LABELS };
     this.logger = options.logger ?? console;
+    this.metrics = options.metrics;
+    this.metrics?.recordEndpointUp("log", 0);
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_BBOX_LOGS_POLL_INTERVAL_MS;
     this.pushUrl = new URL(options.pushUrl);
     this.scrapeTimeoutMs = options.scrapeTimeoutMs ?? this.pollIntervalMs;
@@ -83,8 +69,16 @@ export class BboxLokiLogForwarder {
    * Polls Bbox logs once and pushes unseen entries to Loki.
    */
   async pollOnce() {
-    this.poll ??= this.pushLogsWithTimeout()
+    if (this.poll) return false;
+
+    const startedAt = Date.now();
+    this.metrics?.recordLokiPollStart();
+    this.poll = this.pushLogsWithTimeout()
+      .then(() => {
+        this.metrics?.recordLokiPollSuccess(this.elapsedSeconds(startedAt));
+      })
       .catch((error: unknown) => {
+        this.metrics?.recordLokiPollError(this.elapsedSeconds(startedAt));
         this.logger.error("Bbox Loki log forwarding failed", error);
       })
       .finally(() => {
@@ -92,6 +86,7 @@ export class BboxLokiLogForwarder {
       });
 
     await this.poll;
+    return true;
   }
 
   /**
@@ -143,7 +138,16 @@ export class BboxLokiLogForwarder {
    * Fetches the latest Bbox logs and sends entries not yet seen by this process.
    */
   private async pushLogsFromBbox(signal?: AbortSignal) {
-    const response = await this.bbox.getLogs({ signal });
+    let response: Awaited<ReturnType<BboxLogsClient["getLogs"]>>;
+
+    try {
+      response = await this.bbox.getLogs({ signal });
+      this.metrics?.recordEndpointUp("log", 1);
+    } catch (error) {
+      this.metrics?.recordEndpointUp("log", 0);
+      throw error;
+    }
+
     const entries = this.responseEntries(response).filter(
       (entry) => !this.seenLogKeys.has(entry.key),
     );
@@ -195,6 +199,13 @@ export class BboxLokiLogForwarder {
     const safeTimestampMs = Number.isFinite(timestampMs) ? timestampMs : Date.now();
 
     return String(BigInt(safeTimestampMs) * 1_000_000n);
+  }
+
+  /**
+   * Returns elapsed wall-clock seconds from a millisecond timestamp.
+   */
+  private elapsedSeconds(startedAt: number) {
+    return (Date.now() - startedAt) / 1000;
   }
 
   /**

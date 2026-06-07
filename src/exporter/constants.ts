@@ -1,5 +1,5 @@
 export const BBOX_BANDWIDTH_KILOBITS = 1000;
-export const DEFAULT_BBOX_LOGS_POLL_INTERVAL_MS = 5_000;
+export const DEFAULT_BBOX_LOGS_POLL_INTERVAL_MS = 120_000;
 export const DEFAULT_LOKI_LABELS = {
   job: "bbox-exporter",
   source: "bbox",

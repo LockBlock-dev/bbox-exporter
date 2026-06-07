@@ -14,10 +14,10 @@ import {
 } from "./exporter/config";
 import { BboxLokiLogForwarder } from "./exporter/loki";
 
-const bbox = new BboxClient();
+const metricsBbox = new BboxClient();
 const scrapeTimeoutMs = parseScrapeTimeoutMs(process.env.BBOX_SCRAPE_TIMEOUT_MS);
 const exporter = new BboxExporterClient({
-  bbox,
+  bbox: metricsBbox,
   scrapeTimeoutMs,
 });
 const telemetryAddress = parseTelemetryAddress(process.env.TELEMETRY_ADDRESS);
@@ -25,9 +25,11 @@ const metricsPath = parseMetricsPath(process.env.METRICS_PATH);
 const lokiPushUrl = parseLokiPushUrl(process.env.LOKI_PUSH_URL);
 
 if (lokiPushUrl) {
+  const lokiBbox = new BboxClient();
   const logForwarder = new BboxLokiLogForwarder({
-    bbox,
+    bbox: lokiBbox,
     labels: parseLokiLabels(process.env.LOKI_LABELS),
+    metrics: exporter,
     pollIntervalMs: parseLogsPollIntervalMs(process.env.BBOX_LOGS_POLL_INTERVAL_MS),
     pushUrl: lokiPushUrl,
     scrapeTimeoutMs,
@@ -40,6 +42,7 @@ if (lokiPushUrl) {
 
 const server = Bun.serve({
   hostname: telemetryAddress.hostname,
+  idleTimeout: Math.ceil((scrapeTimeoutMs + 5_000) / 1000),
   port: telemetryAddress.port,
   async fetch(request: Request) {
     const url = new URL(request.url);

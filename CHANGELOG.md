@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-06-07
+
+### Added
+
+- Added cached, background metrics collection so `/metrics` can return promptly while Bbox API refreshes run asynchronously.
+- Added per-endpoint Bbox health with `bbox_endpoint_up`.
+- Added exporter self-metrics for collection duration, collection errors, Loki poll duration, Loki poll errors, and Loki poll in-progress state.
+- Added full metric documentation to the README.
+
+### Changed
+
+- Metrics collection now uses bounded per-endpoint collection instead of one all-or-nothing `Promise.all` batch.
+- Loki log forwarding now uses a separate Bbox client from metrics collection.
+- Loki log polling now skips overlapping polls and defaults to a conservative two-minute interval.
+- Bun's HTTP idle timeout now tracks the configured Bbox scrape timeout to avoid closing slow `/metrics` responses early.
+
+### Fixed
+
+- Prevented a single failed Bbox endpoint from failing the entire metrics refresh.
+- Reduced the chance that slow Bbox API responses cause intermittent Prometheus EOF scrape failures.
+- Ensured Loki log polling failures do not affect `/metrics` availability.
+
 ## [1.3.0] - 2026-06-06
 
 ### Added

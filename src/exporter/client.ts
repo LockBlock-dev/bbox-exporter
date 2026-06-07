@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Gauge, Registry } from "prom-client";
+import { Counter, Gauge, Registry } from "prom-client";
 
 import {
   BboxClient,
@@ -8,43 +8,26 @@ import {
   type BboxNetworkStats,
 } from "../bbox";
 import { BBOX_BANDWIDTH_KILOBITS, DEFAULT_SCRAPE_TIMEOUT_MS } from "./constants";
-import type { GaugeMap, GaugeName, Labels, NumericLike } from "./types";
+import type {
+  BboxEndpointCollector,
+  BboxEndpointResult,
+  BboxExporterClientOptions,
+  BboxLokiMetricsRecorder,
+  BboxMetricsClient,
+  CounterMap,
+  GaugeMap,
+  GaugeName,
+  Labels,
+  NumericLike,
+} from "./types";
 
-export type BboxMetricsClient = Pick<
-  BboxClient,
-  | "login"
-  | "getIptv"
-  | "getIptvDiags"
-  | "getWanIP"
-  | "getWanIPStats"
-  | "getWanFtthStats"
-  | "getWanDiags"
-  | "getLanStats"
-  | "getDevice"
-  | "getDeviceCpu"
-  | "getDeviceMemory"
-  | "getServices"
-  | "getHosts"
-  | "getWireless"
-  | "getWireless24"
-  | "getWireless5"
-  | "getWireless6"
-  | "getWirelessStats"
-  | "getDnsStats"
->;
-
-export interface BboxExporterClientOptions {
-  bbox?: BboxMetricsClient;
-  collectionCacheMs?: number;
-  logger?: Pick<Console, "error" | "warn">;
-  scrapeTimeoutMs?: number;
-}
-
-export class BboxExporterClient {
+export class BboxExporterClient implements BboxLokiMetricsRecorder {
   public readonly registry = new Registry();
 
   private readonly bbox: BboxMetricsClient;
   private readonly collectionCacheMs: number;
+  private readonly counters: CounterMap;
+  private readonly endpointConcurrency: number;
   private readonly gauges: GaugeMap;
   private readonly logger: Pick<Console, "error" | "warn">;
   private readonly scrapeTimeoutMs: number;
@@ -57,10 +40,28 @@ export class BboxExporterClient {
   constructor(options: BboxExporterClientOptions = {}) {
     this.bbox = options.bbox ?? new BboxClient();
     this.collectionCacheMs = options.collectionCacheMs ?? 1000;
+    this.endpointConcurrency = Math.max(1, Math.floor(options.endpointConcurrency ?? 2));
     this.logger = options.logger ?? console;
     this.scrapeTimeoutMs = options.scrapeTimeoutMs ?? DEFAULT_SCRAPE_TIMEOUT_MS;
     this.gauges = {
       up: this.gauge("bbox_up", "Whether the last Bbox scrape succeeded."),
+      endpointUp: this.gauge(
+        "bbox_endpoint_up",
+        "Whether the last Bbox endpoint scrape succeeded.",
+        ["endpoint"],
+      ),
+      collectDuration: this.gauge(
+        "bbox_exporter_collect_duration_seconds",
+        "Duration of the last Bbox metrics collection.",
+      ),
+      lokiPollDuration: this.gauge(
+        "bbox_exporter_loki_poll_duration_seconds",
+        "Duration of the last Bbox Loki log poll.",
+      ),
+      lokiPollInProgress: this.gauge(
+        "bbox_exporter_loki_poll_in_progress",
+        "Whether a Bbox Loki log poll is currently running.",
+      ),
 
       iptvChannel: this.gauge(
         "bbox_iptv_channel",
@@ -414,6 +415,22 @@ export class BboxExporterClient {
         ["service"],
       ),
     };
+    this.counters = {
+      collectErrors: this.counter(
+        "bbox_exporter_collect_errors_total",
+        "Total number of Bbox metrics collections with errors.",
+      ),
+      lokiPollErrors: this.counter(
+        "bbox_exporter_loki_poll_errors_total",
+        "Total number of Bbox Loki log polls with errors.",
+      ),
+    };
+    this.gauges.up.set(0);
+    this.gauges.collectDuration.set(0);
+    this.gauges.lokiPollDuration.set(0);
+    this.gauges.lokiPollInProgress.set(0);
+    this.counters.collectErrors.inc(0);
+    this.counters.lokiPollErrors.inc(0);
   }
 
   /**
@@ -424,10 +441,43 @@ export class BboxExporterClient {
   }
 
   /**
-   * Collects and returns all registered Prometheus metrics.
+   * Returns Prometheus metrics and refreshes Bbox data in the background.
    */
   async metrics() {
+    void this.collectMetrics();
+
     return this.registry.metrics();
+  }
+
+  /**
+   * Records endpoint health from a cooperating background worker.
+   */
+  recordEndpointUp(endpoint: string, up: 0 | 1) {
+    this.gauges.endpointUp.set({ endpoint }, up);
+  }
+
+  /**
+   * Marks a Loki log poll as running.
+   */
+  recordLokiPollStart() {
+    this.gauges.lokiPollInProgress.set(1);
+  }
+
+  /**
+   * Records a successful Loki log poll.
+   */
+  recordLokiPollSuccess(durationSeconds: number) {
+    this.gauges.lokiPollDuration.set(durationSeconds);
+    this.gauges.lokiPollInProgress.set(0);
+  }
+
+  /**
+   * Records a failed Loki log poll.
+   */
+  recordLokiPollError(durationSeconds: number) {
+    this.gauges.lokiPollDuration.set(durationSeconds);
+    this.gauges.lokiPollInProgress.set(0);
+    this.counters.lokiPollErrors.inc();
   }
 
   /**
@@ -439,9 +489,18 @@ export class BboxExporterClient {
       help,
       labelNames,
       registers: [this.registry],
-      collect: async () => {
-        await this.collectMetrics();
-      },
+    });
+  }
+
+  /**
+   * Creates a counter registered in the exporter registry.
+   */
+  private counter(name: string, help: string, labelNames: string[] = []) {
+    return new Counter({
+      name,
+      help,
+      labelNames,
+      registers: [this.registry],
     });
   }
 
@@ -467,11 +526,17 @@ export class BboxExporterClient {
    * Collects all Bbox metrics once for all gauges in a scrape.
    */
   private async collectMetrics() {
+    const startedAt = Date.now();
+
     this.collection ??= this.updateMetricsWithTimeout()
-      .then(() => {
-        this.gauges.up.set(1);
+      .then(async (succeeded) => {
+        this.gauges.collectDuration.set(this.elapsedSeconds(startedAt));
+        if (!succeeded) this.counters.collectErrors.inc();
+        this.gauges.up.set(succeeded ? 1 : 0);
       })
       .catch((error: unknown) => {
+        this.gauges.collectDuration.set(this.elapsedSeconds(startedAt));
+        this.counters.collectErrors.inc();
         this.gauges.up.set(0);
         this.logger.error("Bbox metrics collection failed", error);
       })
@@ -485,6 +550,73 @@ export class BboxExporterClient {
   }
 
   /**
+   * Returns elapsed wall-clock seconds from a millisecond timestamp.
+   */
+  private elapsedSeconds(startedAt: number) {
+    return (Date.now() - startedAt) / 1000;
+  }
+
+  /**
+   * Fetches endpoint data with bounded concurrency and per-endpoint status.
+   */
+  private async collectEndpoints(endpointCollectors: readonly BboxEndpointCollector[]) {
+    const results = new Map<string, BboxEndpointResult>();
+    let nextEndpointIndex = 0;
+
+    const collectNextEndpoint = async () => {
+      while (nextEndpointIndex < endpointCollectors.length) {
+        const endpoint = endpointCollectors[nextEndpointIndex++];
+        if (!endpoint) continue;
+
+        results.set(endpoint.name, await this.collectEndpoint(endpoint));
+      }
+    };
+
+    await Promise.all(
+      Array.from(
+        { length: Math.min(this.endpointConcurrency, endpointCollectors.length) },
+        collectNextEndpoint,
+      ),
+    );
+
+    return results;
+  }
+
+  /**
+   * Fetches one endpoint and updates its health gauge.
+   */
+  private async collectEndpoint(endpoint: BboxEndpointCollector): Promise<BboxEndpointResult> {
+    try {
+      const value = await endpoint.collect();
+      this.gauges.endpointUp.set({ endpoint: endpoint.name }, 1);
+
+      return {
+        name: endpoint.name,
+        ok: true,
+        value,
+      };
+    } catch (error) {
+      this.gauges.endpointUp.set({ endpoint: endpoint.name }, 0);
+
+      return {
+        error,
+        name: endpoint.name,
+        ok: false,
+      };
+    }
+  }
+
+  /**
+   * Reads one successful endpoint response from a result map.
+   */
+  private endpointValue<T>(endpoints: Map<string, BboxEndpointResult>, name: string) {
+    const endpoint = endpoints.get(name);
+    if (!endpoint?.ok) return undefined;
+
+    return endpoint.value as T;
+  }
+
+  /**
    * Fetches Bbox API data and updates gauges.
    */
   private async updateMetricsWithTimeout() {
@@ -494,7 +626,7 @@ export class BboxExporterClient {
     }, this.scrapeTimeoutMs);
 
     try {
-      await Promise.race([
+      return await Promise.race([
         this.updateMetrics(controller.signal),
         new Promise<never>((_, reject) => {
           controller.signal.addEventListener(
@@ -518,14 +650,14 @@ export class BboxExporterClient {
     await this.ensureLoggedIn(signal);
 
     try {
-      await this.updateMetricsFromBbox(signal);
+      return await this.updateMetricsFromBbox(signal);
     } catch (error) {
       if (!this.isAuthenticationError(error)) throw error;
 
       this.login = undefined;
       this.logger.warn("Bbox session expired; retrying authentication once");
       await this.ensureLoggedIn(signal);
-      await this.updateMetricsFromBbox(signal);
+      return await this.updateMetricsFromBbox(signal);
     }
   }
 
@@ -533,91 +665,179 @@ export class BboxExporterClient {
    * Fetches Bbox API data and updates gauges after authentication is ready.
    */
   private async updateMetricsFromBbox(signal?: AbortSignal) {
-    const [
-      iptvResponse,
-      iptvDiagsResponse,
-      wanResponse,
-      wanStatsResponse,
-      wanFtthStatsResponse,
-      wanDiagsResponse,
-      lanStatsResponse,
-      deviceResponse,
-      deviceCpuResponse,
-      deviceMemoryResponse,
-      servicesResponse,
-      hostsResponse,
-      wirelessResponse,
-      wireless24Response,
-      wireless5Response,
-      wireless6Response,
-      wirelessStats24Response,
-      wirelessStats5Response,
-      wirelessStats6Response,
-      dnsStatsResponse,
-    ] = await Promise.all([
-      this.bbox.getIptv({ signal }),
-      this.bbox.getIptvDiags({ signal }),
-      this.bbox.getWanIP({ signal }),
-      this.bbox.getWanIPStats({ signal }),
-      this.bbox.getWanFtthStats({ signal }),
-      this.bbox.getWanDiags({ signal }),
-      this.bbox.getLanStats({ signal }),
-      this.bbox.getDevice({ signal }),
-      this.bbox.getDeviceCpu({ signal }),
-      this.bbox.getDeviceMemory({ signal }),
-      this.bbox.getServices({ signal }),
-      this.bbox.getHosts({ signal }),
-      this.bbox.getWireless({ signal }),
-      this.bbox.getWireless24({ signal }),
-      this.bbox.getWireless5({ signal }),
-      this.bbox.getWireless6({ signal }),
-      this.bbox.getWirelessStats(24, { signal }),
-      this.bbox.getWirelessStats(5, { signal }),
-      this.bbox.getWirelessStats(6, { signal }),
-      this.bbox.getDnsStats({ signal }),
+    const endpoints = await this.collectEndpoints([
+      { name: "iptv", collect: () => this.bbox.getIptv({ signal }) },
+      { name: "iptv_diags", collect: () => this.bbox.getIptvDiags({ signal }) },
+      { name: "wan_ip", collect: () => this.bbox.getWanIP({ signal }) },
+      { name: "wan_ip_stats", collect: () => this.bbox.getWanIPStats({ signal }) },
+      { name: "wan_ftth_stats", collect: () => this.bbox.getWanFtthStats({ signal }) },
+      { name: "wan_diags", collect: () => this.bbox.getWanDiags({ signal }) },
+      { name: "lan_stats", collect: () => this.bbox.getLanStats({ signal }) },
+      { name: "device", collect: () => this.bbox.getDevice({ signal }) },
+      { name: "device_cpu", collect: () => this.bbox.getDeviceCpu({ signal }) },
+      { name: "device_memory", collect: () => this.bbox.getDeviceMemory({ signal }) },
+      { name: "services", collect: () => this.bbox.getServices({ signal }) },
+      { name: "hosts", collect: () => this.bbox.getHosts({ signal }) },
+      { name: "wireless", collect: () => this.bbox.getWireless({ signal }) },
+      { name: "wireless_24", collect: () => this.bbox.getWireless24({ signal }) },
+      { name: "wireless_5", collect: () => this.bbox.getWireless5({ signal }) },
+      { name: "wireless_6", collect: () => this.bbox.getWireless6({ signal }) },
+      { name: "wireless_24_stats", collect: () => this.bbox.getWirelessStats(24, { signal }) },
+      { name: "wireless_5_stats", collect: () => this.bbox.getWirelessStats(5, { signal }) },
+      { name: "wireless_6_stats", collect: () => this.bbox.getWirelessStats(6, { signal }) },
+      { name: "dns_stats", collect: () => this.bbox.getDnsStats({ signal }) },
     ]);
 
-    const iptv = iptvResponse[0];
-    const iptvDiags = iptvDiagsResponse[0];
-    const wan = wanResponse[0]?.wan;
-    const wanStats = wanStatsResponse[0]?.wan?.ip?.stats;
-    const wanFtth = wanFtthStatsResponse[0]?.wan?.ftth;
-    const wanDiags = wanDiagsResponse[0]?.diags;
-    const lanStats = lanStatsResponse[0]?.lan?.stats;
-    const device = deviceResponse[0]?.device;
-    const deviceCpu = deviceCpuResponse[0]?.device?.cpu;
-    const deviceMemory = deviceMemoryResponse[0]?.device?.mem;
-    const services = servicesResponse[0]?.services;
-    const hosts = hostsResponse[0]?.hosts?.list ?? [];
-    const dnsStats = dnsStatsResponse[0]?.dns;
+    const authenticationError = [...endpoints.values()].find(
+      (endpoint) => endpoint.error && this.isAuthenticationError(endpoint.error),
+    )?.error;
+    if (authenticationError) throw authenticationError;
 
-    if (!wanStats) throw new Error("Missing WAN IP stats in Bbox response");
-    if (!lanStats) throw new Error("Missing LAN stats in Bbox response");
-    if (!device) throw new Error("Missing device information in Bbox response");
-    if (!services) throw new Error("Missing service information in Bbox response");
+    let succeeded = true;
+    for (const endpoint of endpoints.values()) {
+      if (endpoint.ok) continue;
 
-    this.updateIptvMetrics(iptv, iptvDiags);
-    this.updateWanMetrics(wanStats);
-    this.updateWanFtthMetrics(wanFtth);
-    this.updateWanDiagnosticsMetrics(wanDiags);
-    this.updateLanMetrics(lanStats, hosts);
-    this.updateHostMetrics(hosts);
-    this.updateDeviceMetrics(device);
-    this.updateDeviceResourceMetrics(deviceCpu, deviceMemory);
-    this.updateWanStateMetrics(wan);
-    this.updateWirelessMetrics([
-      ["main", wirelessResponse[0]?.wireless],
-      ["24", wireless24Response[0]?.wireless],
-      ["5", wireless5Response[0]?.wireless],
-      ["6", wireless6Response[0]?.wireless],
-    ]);
-    this.updateWirelessStatsMetrics([
-      ["24", wirelessStats24Response[0]?.wireless?.ssid],
-      ["5", wirelessStats5Response[0]?.wireless?.ssid],
-      ["6", wirelessStats6Response[0]?.wireless?.ssid],
-    ]);
-    this.updateDnsMetrics(dnsStats);
-    this.updateServiceMetrics(services);
+      succeeded = false;
+      this.logger.warn(`Bbox endpoint scrape failed: ${endpoint.name}`, endpoint.error);
+    }
+
+    const requirePayload = <T>(endpoint: string, payload: T | undefined, message: string) => {
+      if (payload !== undefined) return payload;
+
+      succeeded = false;
+      if (endpoints.get(endpoint)?.ok) {
+        this.gauges.endpointUp.set({ endpoint }, 0);
+        this.logger.warn(message);
+      }
+
+      return undefined;
+    };
+
+    const iptvResponse = this.endpointValue<Awaited<ReturnType<BboxMetricsClient["getIptv"]>>>(
+      endpoints,
+      "iptv",
+    );
+    const iptvDiagsResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getIptvDiags"]>>
+    >(endpoints, "iptv_diags");
+    const wanResponse = this.endpointValue<Awaited<ReturnType<BboxMetricsClient["getWanIP"]>>>(
+      endpoints,
+      "wan_ip",
+    );
+    const wanStatsResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWanIPStats"]>>
+    >(endpoints, "wan_ip_stats");
+    const wanFtthStatsResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWanFtthStats"]>>
+    >(endpoints, "wan_ftth_stats");
+    const wanDiagsResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWanDiags"]>>
+    >(endpoints, "wan_diags");
+    const lanStatsResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getLanStats"]>>
+    >(endpoints, "lan_stats");
+    const deviceResponse = this.endpointValue<Awaited<ReturnType<BboxMetricsClient["getDevice"]>>>(
+      endpoints,
+      "device",
+    );
+    const deviceCpuResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getDeviceCpu"]>>
+    >(endpoints, "device_cpu");
+    const deviceMemoryResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getDeviceMemory"]>>
+    >(endpoints, "device_memory");
+    const servicesResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getServices"]>>
+    >(endpoints, "services");
+    const hostsResponse = this.endpointValue<Awaited<ReturnType<BboxMetricsClient["getHosts"]>>>(
+      endpoints,
+      "hosts",
+    );
+    const wirelessResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWireless"]>>
+    >(endpoints, "wireless");
+    const wireless24Response = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWireless24"]>>
+    >(endpoints, "wireless_24");
+    const wireless5Response = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWireless5"]>>
+    >(endpoints, "wireless_5");
+    const wireless6Response = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWireless6"]>>
+    >(endpoints, "wireless_6");
+    const wirelessStats24Response = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWirelessStats"]>>
+    >(endpoints, "wireless_24_stats");
+    const wirelessStats5Response = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWirelessStats"]>>
+    >(endpoints, "wireless_5_stats");
+    const wirelessStats6Response = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getWirelessStats"]>>
+    >(endpoints, "wireless_6_stats");
+    const dnsStatsResponse = this.endpointValue<
+      Awaited<ReturnType<BboxMetricsClient["getDnsStats"]>>
+    >(endpoints, "dns_stats");
+
+    const iptv = iptvResponse?.[0];
+    const iptvDiags = iptvDiagsResponse?.[0];
+    const wan = wanResponse?.[0]?.wan;
+    const wanStats = requirePayload(
+      "wan_ip_stats",
+      wanStatsResponse?.[0]?.wan?.ip?.stats,
+      "Missing WAN IP stats in Bbox response",
+    );
+    const wanFtth = wanFtthStatsResponse?.[0]?.wan?.ftth;
+    const wanDiags = wanDiagsResponse?.[0]?.diags;
+    const lanStats = requirePayload(
+      "lan_stats",
+      lanStatsResponse?.[0]?.lan?.stats,
+      "Missing LAN stats in Bbox response",
+    );
+    const device = requirePayload(
+      "device",
+      deviceResponse?.[0]?.device,
+      "Missing device information in Bbox response",
+    );
+    const deviceCpu = deviceCpuResponse?.[0]?.device?.cpu;
+    const deviceMemory = deviceMemoryResponse?.[0]?.device?.mem;
+    const services = requirePayload(
+      "services",
+      servicesResponse?.[0]?.services,
+      "Missing service information in Bbox response",
+    );
+    const hosts = hostsResponse?.[0]?.hosts?.list ?? [];
+    const dnsStats = dnsStatsResponse?.[0]?.dns;
+
+    if (iptvResponse && iptvDiagsResponse) this.updateIptvMetrics(iptv, iptvDiags);
+    if (wanStats) this.updateWanMetrics(wanStats);
+    if (wanFtthStatsResponse) this.updateWanFtthMetrics(wanFtth);
+    if (wanDiagsResponse) this.updateWanDiagnosticsMetrics(wanDiags);
+    if (lanStats && hostsResponse) this.updateLanMetrics(lanStats, hosts);
+    if (hostsResponse) this.updateHostMetrics(hosts);
+    if (device) this.updateDeviceMetrics(device);
+    if (deviceCpuResponse && deviceMemoryResponse) {
+      this.updateDeviceResourceMetrics(deviceCpu, deviceMemory);
+    }
+    if (wanResponse) this.updateWanStateMetrics(wan);
+    if (wirelessResponse && wireless24Response && wireless5Response && wireless6Response) {
+      this.updateWirelessMetrics([
+        ["main", wirelessResponse[0]?.wireless],
+        ["24", wireless24Response[0]?.wireless],
+        ["5", wireless5Response[0]?.wireless],
+        ["6", wireless6Response[0]?.wireless],
+      ]);
+    }
+    if (wirelessStats24Response && wirelessStats5Response && wirelessStats6Response) {
+      this.updateWirelessStatsMetrics([
+        ["24", wirelessStats24Response[0]?.wireless?.ssid],
+        ["5", wirelessStats5Response[0]?.wireless?.ssid],
+        ["6", wirelessStats6Response[0]?.wireless?.ssid],
+      ]);
+    }
+    if (dnsStatsResponse) this.updateDnsMetrics(dnsStats);
+    if (services) this.updateServiceMetrics(services);
+
+    return succeeded;
   }
 
   /**

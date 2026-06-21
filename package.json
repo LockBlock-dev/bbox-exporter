@@ -1,7 +1,9 @@
 {
     "name": "bbox-exporter",
-    "version": "1.4.0",
+    "version": "1.4.1",
     "private": true,
+    "author": "LockBlock-dev",
+    "license": "AGPL-3.0-or-later",
     "type": "module",
     "module": "src/index.ts",
     "scripts": {

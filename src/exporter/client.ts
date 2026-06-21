@@ -8,6 +8,7 @@ import {
   type BboxNetworkStats,
 } from "../bbox";
 import { BBOX_BANDWIDTH_KILOBITS, DEFAULT_SCRAPE_TIMEOUT_MS } from "./constants";
+import { errorMessage } from "./logging";
 import type {
   BboxEndpointCollector,
   BboxEndpointResult,
@@ -21,6 +22,11 @@ import type {
   NumericLike,
 } from "./types";
 
+interface BboxMetricsCollectionResult {
+  failures: BboxEndpointResult[];
+  totalEndpoints: number;
+}
+
 export class BboxExporterClient implements BboxLokiMetricsRecorder {
   public readonly registry = new Registry();
 
@@ -32,6 +38,7 @@ export class BboxExporterClient implements BboxLokiMetricsRecorder {
   private readonly logger: Pick<Console, "error" | "warn">;
   private readonly scrapeTimeoutMs: number;
   private collection?: Promise<void>;
+  private collectionFailed = false;
   private login?: Promise<void>;
 
   /**
@@ -529,16 +536,19 @@ export class BboxExporterClient implements BboxLokiMetricsRecorder {
     const startedAt = Date.now();
 
     this.collection ??= this.updateMetricsWithTimeout()
-      .then(async (succeeded) => {
+      .then((result) => {
+        const succeeded = result.failures.length === 0;
         this.gauges.collectDuration.set(this.elapsedSeconds(startedAt));
         if (!succeeded) this.counters.collectErrors.inc();
         this.gauges.up.set(succeeded ? 1 : 0);
+        if (succeeded) this.reportCollectionRecovery();
+        else this.reportEndpointFailures(result);
       })
       .catch((error: unknown) => {
         this.gauges.collectDuration.set(this.elapsedSeconds(startedAt));
         this.counters.collectErrors.inc();
         this.gauges.up.set(0);
-        this.logger.error("Bbox metrics collection failed", error);
+        this.reportCollectionFailure(`Bbox metrics collection failed: ${errorMessage(error)}`);
       })
       .finally(() => {
         setTimeout(() => {
@@ -554,6 +564,40 @@ export class BboxExporterClient implements BboxLokiMetricsRecorder {
    */
   private elapsedSeconds(startedAt: number) {
     return (Date.now() - startedAt) / 1000;
+  }
+
+  /**
+   * Logs the transition into a failed metrics collection state once.
+   */
+  private reportCollectionFailure(message: string) {
+    if (this.collectionFailed) return;
+
+    this.collectionFailed = true;
+    this.logger.error(message);
+  }
+
+  /**
+   * Logs the transition back to successful metrics collection once.
+   */
+  private reportCollectionRecovery() {
+    if (!this.collectionFailed) return;
+
+    this.collectionFailed = false;
+    this.logger.warn("Bbox metrics collection recovered");
+  }
+
+  /**
+   * Summarizes all failed endpoints without logging their stack traces.
+   */
+  private reportEndpointFailures(result: BboxMetricsCollectionResult) {
+    const endpointNames = result.failures.map((failure) => failure.name).join(", ");
+    const reasons = [
+      ...new Set(result.failures.map((failure) => errorMessage(failure.error))),
+    ].join("; ");
+
+    this.reportCollectionFailure(
+      `Bbox metrics collection failed: ${result.failures.length}/${result.totalEndpoints} endpoints failed (${endpointNames}): ${reasons}`,
+    );
   }
 
   /**
@@ -693,21 +737,14 @@ export class BboxExporterClient implements BboxLokiMetricsRecorder {
     )?.error;
     if (authenticationError) throw authenticationError;
 
-    let succeeded = true;
-    for (const endpoint of endpoints.values()) {
-      if (endpoint.ok) continue;
-
-      succeeded = false;
-      this.logger.warn(`Bbox endpoint scrape failed: ${endpoint.name}`, endpoint.error);
-    }
+    const failures = [...endpoints.values()].filter((endpoint) => !endpoint.ok);
 
     const requirePayload = <T>(endpoint: string, payload: T | undefined, message: string) => {
       if (payload !== undefined) return payload;
 
-      succeeded = false;
       if (endpoints.get(endpoint)?.ok) {
         this.gauges.endpointUp.set({ endpoint }, 0);
-        this.logger.warn(message);
+        failures.push({ error: new Error(message), name: endpoint, ok: false });
       }
 
       return undefined;
@@ -837,7 +874,10 @@ export class BboxExporterClient implements BboxLokiMetricsRecorder {
     if (dnsStatsResponse) this.updateDnsMetrics(dnsStats);
     if (services) this.updateServiceMetrics(services);
 
-    return succeeded;
+    return {
+      failures,
+      totalEndpoints: endpoints.size,
+    };
   }
 
   /**

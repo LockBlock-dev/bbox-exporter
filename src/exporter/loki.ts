@@ -1,5 +1,6 @@
 import { BboxClient, type BboxLogItem } from "../bbox";
 import { DEFAULT_BBOX_LOGS_POLL_INTERVAL_MS, DEFAULT_LOKI_LABELS } from "./constants";
+import { errorMessage } from "./logging";
 import type {
   BboxLokiMetricsRecorder,
   BboxLogsClient,
@@ -27,6 +28,7 @@ export class BboxLokiLogForwarder {
   private interval: ReturnType<typeof setInterval> | undefined;
   private login: Promise<void> | undefined;
   private poll: Promise<void> | undefined;
+  private pollFailed = false;
 
   /**
    * Creates a Bbox log forwarder for one Loki push endpoint.
@@ -76,10 +78,11 @@ export class BboxLokiLogForwarder {
     this.poll = this.pushLogsWithTimeout()
       .then(() => {
         this.metrics?.recordLokiPollSuccess(this.elapsedSeconds(startedAt));
+        this.reportPollRecovery();
       })
       .catch((error: unknown) => {
         this.metrics?.recordLokiPollError(this.elapsedSeconds(startedAt));
-        this.logger.error("Bbox Loki log forwarding failed", error);
+        this.reportPollFailure(error);
       })
       .finally(() => {
         this.poll = undefined;
@@ -87,6 +90,26 @@ export class BboxLokiLogForwarder {
 
     await this.poll;
     return true;
+  }
+
+  /**
+   * Logs the transition into a failed Loki polling state once.
+   */
+  private reportPollFailure(error: unknown) {
+    if (this.pollFailed) return;
+
+    this.pollFailed = true;
+    this.logger.error(`Bbox Loki log forwarding failed: ${errorMessage(error)}`);
+  }
+
+  /**
+   * Logs the transition back to successful Loki polling once.
+   */
+  private reportPollRecovery() {
+    if (!this.pollFailed) return;
+
+    this.pollFailed = false;
+    this.logger.warn("Bbox Loki log forwarding recovered");
   }
 
   /**

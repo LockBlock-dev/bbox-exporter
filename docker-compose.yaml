@@ -4,7 +4,7 @@ services:
       context: .
       args:
         BUN_VERSION: "1.3"
-    image: bbox-exporter:latest
+    image: ghcr.io/lockblock-dev/bbox-exporter:latest
     restart: unless-stopped
     environment:
       BBOX_PASSWORD: ${BBOX_PASSWORD:?BBOX_PASSWORD is required}
